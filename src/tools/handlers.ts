@@ -9,6 +9,8 @@ import {
 } from "../browser/connection.js";
 import { notifyConsoleUpdate, notifyScreenshotUpdate } from "../resources/handlers.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import path from "path";
+import { mkdir } from "fs/promises";
 
 export async function handleToolCall(
   name: string, 
@@ -105,9 +107,19 @@ export async function handleToolCall(
       const height = args.height ?? 600;
       await page.setViewport({ width, height });
 
+      const filePath: string | undefined = typeof args.filepass === 'string' && args.filepass.trim() ? args.filepass : undefined;
+      if (filePath) {
+        const dir = path.dirname(filePath);
+        try {
+          await mkdir(dir, { recursive: true });
+        } catch (e) {
+          // ignore mkdir errors; screenshot will fail if path is invalid
+        }
+      }
+
       const screenshot = await (args.selector ?
-        (await page.$(args.selector))?.screenshot({ encoding: "base64" }) :
-        page.screenshot({ encoding: "base64", fullPage: false }));
+        (await page.$(args.selector))?.screenshot(filePath ? { encoding: "base64", path: filePath } : { encoding: "base64" }) :
+        page.screenshot(filePath ? { encoding: "base64", fullPage: false, path: filePath } : { encoding: "base64", fullPage: false }));
 
       if (!screenshot) {
         return {
@@ -119,8 +131,16 @@ export async function handleToolCall(
         };
       }
 
+      // Keep resource listing feature by storing base64 in memory regardless of file saving
       state.screenshots.set(args.name, screenshot);
       notifyScreenshotUpdate(server);
+
+      if (filePath) {
+        return {
+          content: [{ type: "text", text: filePath }],
+          isError: false,
+        };
+      }
 
       return {
         content: [
@@ -267,6 +287,316 @@ export async function handleToolCall(
           content: [{
             type: "text",
             text: `Script execution failed: ${error instanceof Error ? error.message : String(error)}\n\nPossible causes:\n- Syntax error in script\n- Execution timeout\n- Browser security restrictions\n- Serialization issues with complex objects`,
+          }],
+          isError: true,
+        };
+      }
+
+    case "puppeteer_get_compact_page_representation":
+      try {
+        // Default, constant options (arguments are ignored)
+        const options = {
+          interactiveTags: ["a", "button", "input", "i", "select", "textarea"],
+          keepAttrs: ["id", "class", "href", "src", "srcset"],
+          stripAttrs: true,
+          dropAriaAttrs: true,
+          dropDataAttrs: false,
+          keepStyle: true,
+          pretty: false,
+          indent: 2,
+          cssHead: true,
+          includeIdInHead: true,
+          spanAlias: 'span',
+          attrMap: true,
+          relevantOnly: true,
+        } as const;
+
+        const sexpr: string = await page.evaluate((opts: any) => {
+          // Build a working clone to avoid modifying the live DOM
+          const originalRoot = document.documentElement;
+          const root = originalRoot.cloneNode(true) as any;
+
+          const toLowerSet = (arr: any[]) => new Set(arr.map((s: any) => String(s).toLowerCase()));
+          const KEEP = toLowerSet(opts.keepAttrs || []);
+          const INTER = toLowerSet(opts.interactiveTags || []);
+
+          const REMOVE_TAGS = new Set(["script","style","noscript","template","meta","link","svg","math"]);
+          const ALLOWED_HTML_TAGS = new Set([
+            "html","head","title","base","link","meta","style","script","noscript","body",
+            "section","nav","article","aside","h1","h2","h3","h4","h5","h6","header",
+            "footer","address","main","p","hr","pre","blockquote","ol","ul","li","dl","dt",
+            "dd","figure","figcaption","div","a","em","strong","small","s","cite","q","dfn",
+            "abbr","ruby","rb","rt","rtc","rp","data","time","code","var","samp","kbd",
+            "sub","sup","i","b","u","mark","bdi","bdo","span","br","wbr","ins","del",
+            "picture","source","img","iframe","embed","object","param","video","audio","track",
+            "map","area","table","caption","colgroup","col","tbody","thead","tfoot","tr","td",
+            "th","form","label","input","button","select","datalist","optgroup","option","textarea",
+            "output","progress","meter","fieldset","legend","details","summary","dialog","slot",
+            "template","canvas","menu"
+          ]);
+
+          function forEachElement(rootEl: any, cb: (el: any) => void) {
+            const all = rootEl.querySelectorAll('*');
+            (Array.from(all) as any[]).forEach(cb);
+          }
+
+          function removeComments(node: any) {
+            const children = Array.from(node.childNodes) as any[];
+            for (const child of children) {
+              if (child.nodeType === 8 /* COMMENT_NODE */) {
+                child.parentNode?.removeChild(child);
+              } else if (child.nodeType === 1 /* ELEMENT_NODE */) {
+                removeComments(child);
+              }
+            }
+          }
+
+          function parseStyleAttr(styleValue: string) {
+            const styles: Record<string, string> = {};
+            for (const item of styleValue.split(';')) {
+              const idx = item.indexOf(':');
+              if (idx !== -1) {
+                const k = item.slice(0, idx).trim().toLowerCase();
+                const v = item.slice(idx + 1).trim().toLowerCase();
+                if (k) styles[k] = v;
+              }
+            }
+            return styles;
+          }
+
+          function hasHiddenFlag(el: any): boolean {
+            if (el.hasAttribute('hidden')) return true;
+            const aria = (el.getAttribute('aria-hidden') || '').trim().toLowerCase();
+            if (aria === 'true' || aria === '1' || aria === 'yes') return true;
+            if (el.tagName.toLowerCase() === 'input' && (el.getAttribute('type') || '').trim().toLowerCase() === 'hidden') return true;
+            const style = el.getAttribute('style') || '';
+            if (style) {
+              const s = parseStyleAttr(style);
+              const disp = s['display'];
+              if (disp && disp.includes('none')) return true;
+              const vis = s['visibility'];
+              if (vis && vis.includes('hidden')) return true;
+              const op = s['opacity'];
+              if (op != null && op.trim().startsWith('0')) return true;
+            }
+            return false;
+          }
+
+          // 1) Remove comments
+          removeComments(root);
+
+          // 2) Remove known non-content tags entirely
+          for (const tag of REMOVE_TAGS) {
+            root.querySelectorAll(tag).forEach((t: any) => t.parentElement?.removeChild(t));
+          }
+
+          // 3) Remove namespaced tags (with ':')
+          forEachElement(root, (el) => {
+            const name = el.tagName.toLowerCase();
+            if (name.includes(':')) {
+              el.parentElement?.removeChild(el);
+            }
+          });
+
+          // 4) Unwrap custom/non-standard elements to preserve their children
+          forEachElement(root, (el) => {
+            const name = el.tagName.toLowerCase();
+            if (!ALLOWED_HTML_TAGS.has(name)) {
+              const parent = el.parentElement;
+              if (!parent) return;
+              while (el.firstChild) parent.insertBefore(el.firstChild, el);
+              parent.removeChild(el);
+            }
+          });
+
+          // 5) Strip base64 data URIs from <img src/srcset>
+          root.querySelectorAll('img').forEach((img: any) => {
+            const src = img.getAttribute('src');
+            if (src && src.trim().toLowerCase().startsWith('data:')) {
+              img.setAttribute('src', '');
+            }
+            const srcset = img.getAttribute('srcset');
+            if (srcset && srcset.toLowerCase().includes('data:')) {
+              const parts = srcset.split(',').map((p: string) => p.trim());
+              const filtered = parts.filter((p: string) => !p.toLowerCase().startsWith('data:'));
+              img.setAttribute('srcset', filtered.join(', '));
+            }
+          });
+
+          // 6) Prune hidden subtrees (self or by ancestors)
+          (function pruneHidden(node: any, hiddenUpstream: boolean) {
+            const children = Array.from(node.children) as any[];
+            for (const child of children) {
+              const hidden = hiddenUpstream || hasHiddenFlag(child);
+              if (hidden) {
+                child.parentElement?.removeChild(child);
+              } else {
+                pruneHidden(child, hidden);
+              }
+            }
+          })(root, false);
+
+          // 7) Optional attribute stripping
+          if (opts.stripAttrs) {
+            const tagAllow: Record<string, Set<string>> = {
+              'a': new Set(['href']),
+              'img': new Set(['src','srcset']),
+              'input': new Set(['type','name','value','checked','disabled','placeholder']),
+              'label': new Set(['for']),
+              'button': new Set(['type','name','value','disabled']),
+              'select': new Set(['name','disabled','multiple']),
+              'option': new Set(['value','selected','disabled']),
+              'textarea': new Set(['name','disabled','placeholder']),
+              'form': new Set([]),
+              'iframe': new Set(['src']),
+            };
+
+            forEachElement(root, (el: any) => {
+              const allowed = new Set([...(KEEP || new Set<string>())]);
+              const tag = el.tagName.toLowerCase();
+              const extra = tagAllow[tag];
+              if (extra) extra.forEach(a => allowed.add(a));
+              const names = el.getAttributeNames();
+              for (const attr of names) {
+                const al = attr.toLowerCase();
+                if (al.startsWith('on')) { el.removeAttribute(attr); continue; }
+                if (al === 'style' && !opts.keepStyle) { el.removeAttribute(attr); continue; }
+                if (allowed.has(al)) continue;
+                if (!opts.dropDataAttrs && al.startsWith('data-')) continue;
+                if (!opts.dropAriaAttrs && al.startsWith('aria-')) continue;
+                el.removeAttribute(attr);
+              }
+            });
+          }
+
+          // 8) Prune DOM to relevant-only if requested
+          if (opts.relevantOnly) {
+            const interSelector = Array.from(INTER).join(',');
+
+            function hasDirectText(el: any): boolean {
+              for (const n of Array.from(el.childNodes) as any[]) {
+                if (n.nodeType === 3 /* TEXT_NODE */ && (n.textContent || '').trim()) return true;
+              }
+              return false;
+            }
+
+            function shouldKeep(el: any): boolean {
+              const name = el.tagName.toLowerCase();
+              if (INTER.has(name)) return true;
+              if ((el.getAttribute('id') || '').trim()) return true;
+              if (hasDirectText(el)) return true;
+              if (interSelector && (el as any).querySelector(interSelector)) return true;
+              return false;
+            }
+
+            function prune(node: any): boolean {
+              // Process children first
+              for (const child of Array.from(node.children) as any[]) {
+                const keepChild = prune(child);
+                if (!keepChild) child.parentElement?.removeChild(child);
+              }
+              // Drop whitespace-only text nodes
+              for (const t of Array.from(node.childNodes) as any[]) {
+                if (t.nodeType === 3 /* TEXT_NODE */ && !(t.textContent || '').trim()) {
+                  t.parentNode?.removeChild(t);
+                }
+              }
+              const name = node.tagName.toLowerCase();
+              if (name === 'html' || name === 'body') return true;
+              return shouldKeep(node);
+            }
+
+            const top = root; // root is <html>
+            prune(top as any);
+          }
+
+          // 9) Serialize to S-expression
+          const keepAttrs = KEEP.size ? KEEP : new Set(["id","class","name","href","src","srcset","for","value","type","role"]);
+
+          function q(s: string): string {
+            return '"' + s.replace(/\\/g, "\\\\").replace(/\"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t") + '"';
+          }
+
+          function normText(s: string): string {
+            return s.split(/\s+/).filter(Boolean).join(' ');
+          }
+
+          function attrItems(el: any): Array<[string,string]> {
+            const acc: Array<[string,string]> = [];
+            for (const attr of el.getAttributeNames()) {
+              const k = attr.toLowerCase();
+              if (opts.cssHead && k === 'class') continue;
+              if (opts.cssHead && opts.includeIdInHead && k === 'id' && (el.getAttribute('id') || '').trim()) continue;
+              if (!keepAttrs.has(k)) continue;
+              let v = el.getAttribute(attr);
+              if (k === 'class') v = (el as any).className || v || '';
+              acc.push([k, v ?? '']);
+            }
+            acc.sort((a,b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+            return acc;
+          }
+
+          function headToken(el: any): string {
+            if (!opts.cssHead) return el.tagName.toLowerCase();
+            const name = el.tagName.toLowerCase();
+            let base = '';
+            if (name === 'div') base = '';
+            else if (name === 'span') base = opts.spanAlias || 'sp';
+            else base = name;
+            let token = base;
+            const id = (el.getAttribute('id') || '').trim();
+            const cls = ((el as any).className || '').trim();
+            if (opts.includeIdInHead && id) token += `#${id}`;
+            if (cls) token += cls.split(/\s+/).filter(Boolean).map((c: string) => `.${c}`).join('');
+            if (!token) token = 'div';
+            return token;
+          }
+
+          function emit(node: any, depth: number): string {
+            if (node.nodeType === 3 /* TEXT_NODE */) {
+              const txt = normText(node.textContent || '');
+              if (!txt.trim()) return '';
+              return opts.pretty ? ' '.repeat(opts.indent * depth) + q(txt) : q(txt);
+            }
+            if (node.nodeType === 1 /* ELEMENT_NODE */) {
+              const el = node as any;
+              let out = opts.pretty ? ' '.repeat(opts.indent * depth) + '(' + headToken(el) : '(' + headToken(el);
+              const attrs = attrItems(el);
+              if (opts.attrMap && attrs.length) {
+                const amap = '{' + attrs.map(([k,v]) => `:${k} ${q(v)}`).join(' ') + '}';
+                out += ' ' + amap;
+              } else {
+                for (const [k,v] of attrs) out += ` :${k} ${q(v)}`;
+              }
+              const frags: string[] = [];
+              for (const child of Array.from(el.childNodes)) {
+                const frag = emit(child, depth + 1);
+                if (frag) frags.push(frag);
+              }
+              if (!frags.length) return out + ')';
+              if (opts.pretty) return out + '\n' + frags.join('\n') + '\n' + ' '.repeat(opts.indent * depth) + ')';
+              return out + ' ' + frags.join(' ') + ')';
+            }
+            return '';
+          }
+
+          const topEl = root as any; // <html>
+          return emit(topEl, 0);
+        }, options);
+
+        return {
+          content: [{
+            type: 'text',
+            text: sexpr,
+          }],
+          isError: false,
+        };
+      } catch (error) {
+        logger.error('Failed to generate compact page representation', { error: error instanceof Error ? error.message : String(error) });
+        return {
+          content: [{
+            type: 'text',
+            text: `Failed to generate compact representation: ${error instanceof Error ? error.message : String(error)}`,
           }],
           isError: true,
         };
