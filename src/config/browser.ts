@@ -17,16 +17,28 @@ const sandboxBypassArgs = [
 // Detect root user (Linux)
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 
+// Detect CI or headless server environment (no X server)
+const isCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
+const hasDisplay = !!process.env.DISPLAY;
+const headlessInNpx = isCI || !hasDisplay;
+
 // NPX configuration for local development
+const npxArgs = isRoot ? [...commonArgs, ...sandboxBypassArgs] : [...commonArgs];
+if (headlessInNpx) {
+  // Extra flags helpful in CI/headless linux
+  npxArgs.unshift("--headless=new");
+  npxArgs.push("--disable-dev-shm-usage", "--disable-gpu", "--no-zygote");
+}
 export const npxConfig: LaunchOptions = { 
-  headless: false,
-  args: isRoot ? [...commonArgs, ...sandboxBypassArgs] : commonArgs,
+  headless: headlessInNpx,
+  args: npxArgs,
 };
 
 // Docker configuration for containerized environment
 export const dockerConfig: LaunchOptions = { 
   headless: true, 
   args: [
+    "--headless=new",
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
