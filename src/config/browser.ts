@@ -8,10 +8,19 @@ const commonArgs = [
   "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" // Modern Chrome UA
 ];
 
+// Additional flags required when running as root (Chromium sandbox cannot start)
+const sandboxBypassArgs = [
+  "--no-sandbox",
+  "--disable-setuid-sandbox",
+];
+
+// Detect root user (Linux)
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
 // NPX configuration for local development
 export const npxConfig: LaunchOptions = { 
   headless: false,
-  args: commonArgs
+  args: isRoot ? [...commonArgs, ...sandboxBypassArgs] : commonArgs,
 };
 
 // Docker configuration for containerized environment
@@ -19,10 +28,12 @@ export const dockerConfig: LaunchOptions = {
   headless: true, 
   args: [
     "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
     "--single-process",
     "--no-zygote",
-    ...commonArgs
-  ]
+    ...commonArgs,
+  ],
 };
 
 // Default navigation timeout in milliseconds
