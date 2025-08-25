@@ -10,7 +10,7 @@ import {
 import { notifyConsoleUpdate, notifyScreenshotUpdate } from "../resources/handlers.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import path from "path";
-import { mkdir } from "fs/promises";
+import { mkdir, stat } from "fs/promises";
 
 export async function handleToolCall(
   name: string, 
@@ -117,9 +117,28 @@ export async function handleToolCall(
         }
       }
 
-      const screenshot = await (args.selector ?
-        (await page.$(args.selector))?.screenshot(filePath ? { encoding: "base64", path: filePath } : { encoding: "base64" }) :
-        page.screenshot(filePath ? { encoding: "base64", fullPage: false, path: filePath } : { encoding: "base64", fullPage: false }));
+      let screenshot: string | undefined;
+      try {
+        screenshot = await (args.selector ?
+          (await page.$(args.selector))?.screenshot(filePath ? { encoding: "base64", path: filePath } : { encoding: "base64" }) :
+          page.screenshot(filePath ? { encoding: "base64", fullPage: false, path: filePath } : { encoding: "base64", fullPage: false }));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (filePath) {
+          const dir = path.dirname(filePath);
+          return {
+            content: [{
+              type: "text",
+              text: `Screenshot failed while saving to file\nPath: ${filePath}\nDir: ${dir}\nError: ${msg}\nPossible causes: permission denied, invalid path, or insufficient disk space.`,
+            }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text", text: `Screenshot failed: ${msg}` }],
+          isError: true,
+        };
+      }
 
       if (!screenshot) {
         return {
@@ -136,6 +155,28 @@ export async function handleToolCall(
       notifyScreenshotUpdate(server);
 
       if (filePath) {
+        try {
+          const st = await stat(filePath);
+          if (!st.isFile() || st.size <= 0) {
+            return {
+              content: [{
+                type: "text",
+                text: `Screenshot file validation failed: ${filePath} ${!st.isFile() ? '(not a regular file)' : '(empty file)'}\nThe screenshot may not have been saved correctly.`,
+              }],
+              isError: true,
+            };
+          }
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          const dir = path.dirname(filePath);
+          return {
+            content: [{
+              type: "text",
+              text: `Screenshot reported success but file not found\nPath: ${filePath}\nDir: ${dir}\nError: ${msg}`,
+            }],
+            isError: true,
+          };
+        }
         return {
           content: [{ type: "text", text: filePath }],
           isError: false,
