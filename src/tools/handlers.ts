@@ -10,7 +10,8 @@ import {
 import { notifyConsoleUpdate, notifyScreenshotUpdate } from "../resources/handlers.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import path from "path";
-import { mkdir, stat } from "fs/promises";
+import { mkdir, stat, writeFile } from "fs/promises";
+import { Buffer } from "buffer";
 
 export async function handleToolCall(
   name: string, 
@@ -107,7 +108,11 @@ export async function handleToolCall(
       const height = args.height ?? 600;
       await page.setViewport({ width, height });
 
-      const filePath: string | undefined = typeof args.filepass === 'string' && args.filepass.trim() ? args.filepass : undefined;
+      const filePathInput: string | undefined = typeof args.filepass === 'string' && args.filepass.trim() ? args.filepass : undefined;
+      const baseDir = process.env.GITHUB_WORKSPACE || process.cwd();
+      const filePath: string | undefined = filePathInput
+        ? (path.isAbsolute(filePathInput) ? filePathInput : path.join(baseDir, filePathInput))
+        : undefined;
       if (filePath) {
         const dir = path.dirname(filePath);
         try {
@@ -156,26 +161,69 @@ export async function handleToolCall(
 
       if (filePath) {
         try {
-          const st = await stat(filePath);
+          let st = await stat(filePath);
           if (!st.isFile() || st.size <= 0) {
+            // Attempt fallback write from the captured base64
+            try {
+              await writeFile(filePath, Buffer.from(screenshot, 'base64'));
+              st = await stat(filePath);
+              if (!st.isFile() || st.size <= 0) {
+                return {
+                  content: [{
+                    type: "text",
+                    text: `Screenshot file validation failed after fallback write: ${filePath} ${!st.isFile() ? '(not a regular file)' : '(empty file)'}`,
+                  }],
+                  isError: true,
+                };
+              }
+            } catch (e2) {
+              const msg2 = e2 instanceof Error ? e2.message : String(e2);
+              return {
+                content: [{
+                  type: "text",
+                  text: `Screenshot file validation failed and fallback write errored\nPath: ${filePath}\nError: ${msg2}`,
+                }],
+                isError: true,
+              };
+            }
+          }
+        } catch (e) {
+          // File missing: attempt to create it from base64 then verify
+          try {
+            await writeFile(filePath, Buffer.from(screenshot, 'base64'));
+          } catch (e2) {
+            const msg2 = e2 instanceof Error ? e2.message : String(e2);
+            const dir = path.dirname(filePath);
             return {
               content: [{
                 type: "text",
-                text: `Screenshot file validation failed: ${filePath} ${!st.isFile() ? '(not a regular file)' : '(empty file)'}\nThe screenshot may not have been saved correctly.`,
+                text: `Screenshot reported success but file missing; fallback write failed\nPath: ${filePath}\nDir: ${dir}\nError: ${msg2}`,
               }],
               isError: true,
             };
           }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          const dir = path.dirname(filePath);
-          return {
-            content: [{
-              type: "text",
-              text: `Screenshot reported success but file not found\nPath: ${filePath}\nDir: ${dir}\nError: ${msg}`,
-            }],
-            isError: true,
-          };
+          // Verify after fallback write
+          try {
+            const st2 = await stat(filePath);
+            if (!st2.isFile() || st2.size <= 0) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `Screenshot fallback write produced invalid file: ${filePath} ${!st2.isFile() ? '(not a regular file)' : '(empty file)'}`,
+                }],
+                isError: true,
+              };
+            }
+          } catch (e3) {
+            const msg3 = e3 instanceof Error ? e3.message : String(e3);
+            return {
+              content: [{
+                type: "text",
+                text: `Screenshot fallback write verification failed\nPath: ${filePath}\nError: ${msg3}`,
+              }],
+              isError: true,
+            };
+          }
         }
         return {
           content: [{ type: "text", text: filePath }],
