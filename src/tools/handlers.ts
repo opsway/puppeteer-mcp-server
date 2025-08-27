@@ -11,7 +11,6 @@ import { notifyConsoleUpdate, notifyScreenshotUpdate } from "../resources/handle
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import path from "path";
 import { mkdir, stat, writeFile } from "fs/promises";
-import { Buffer } from "buffer";
 
 export async function handleToolCall(
   name: string, 
@@ -165,7 +164,7 @@ export async function handleToolCall(
           if (!st.isFile() || st.size <= 0) {
             // Attempt fallback write from the captured base64
             try {
-              await writeFile(filePath, Buffer.from(screenshot, 'base64'));
+              await writeFile(filePath, screenshot, { encoding: 'base64' });
               st = await stat(filePath);
               if (!st.isFile() || st.size <= 0) {
                 return {
@@ -190,7 +189,7 @@ export async function handleToolCall(
         } catch (e) {
           // File missing: attempt to create it from base64 then verify
           try {
-            await writeFile(filePath, Buffer.from(screenshot, 'base64'));
+            await writeFile(filePath, screenshot, { encoding: 'base64' });
           } catch (e2) {
             const msg2 = e2 instanceof Error ? e2.message : String(e2);
             const dir = path.dirname(filePath);

@@ -9,8 +9,16 @@ let page: Page | undefined;
 
 export async function ensureBrowser(): Promise<Page> {
   if (!browser) {
+    const baseConfig = process.env.DOCKER_CONTAINER ? dockerConfig : npxConfig;
+    const args = baseConfig.args ? [...baseConfig.args] : [];
+    // Ensure --no-zygote is only used together with sandbox disabled
+    if (args.indexOf('--no-zygote') !== -1 && args.indexOf('--no-sandbox') === -1) {
+      args.push('--no-sandbox', '--disable-setuid-sandbox');
+    }
+    const finalConfig = { ...baseConfig, args };
     logger.info('Launching browser with config:', process.env.DOCKER_CONTAINER ? 'docker' : 'npx');
-    browser = await puppeteer.launch(process.env.DOCKER_CONTAINER ? dockerConfig : npxConfig);
+    logger.debug('Puppeteer launch options', { headless: finalConfig.headless, args: finalConfig.args });
+    browser = await puppeteer.launch(finalConfig);
     const pages = await browser.pages();
     page = pages[0];
 

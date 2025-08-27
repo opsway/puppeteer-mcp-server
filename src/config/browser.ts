@@ -1,4 +1,5 @@
 import { LaunchOptions } from 'puppeteer';
+import { logger } from './logger.js';
 
 // Common browser arguments for both NPX and Docker environments
 const commonArgs = [
@@ -22,17 +23,26 @@ const isCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
 const hasDisplay = !!process.env.DISPLAY;
 const headlessInNpx = isCI || !hasDisplay;
 
-// NPX configuration for local development
+// NPX configuration for local/CI environments
 const npxArgs = isRoot ? [...commonArgs, ...sandboxBypassArgs] : [...commonArgs];
 if (headlessInNpx) {
   // Extra flags helpful in CI/headless linux
   npxArgs.unshift("--headless=new");
-  npxArgs.push("--disable-dev-shm-usage", "--disable-gpu", "--no-zygote");
+  npxArgs.push("--disable-dev-shm-usage", "--disable-gpu");
+  // Only add --no-zygote when sandbox is disabled to avoid Chrome error
+  if (isRoot || isCI) {
+    if (npxArgs.indexOf("--no-sandbox") === -1) {
+      npxArgs.push(...sandboxBypassArgs);
+    }
+    npxArgs.push("--no-zygote");
+  }
 }
 export const npxConfig: LaunchOptions = { 
   headless: headlessInNpx,
   args: npxArgs,
 };
+
+logger.debug('Resolved Puppeteer NPX config', { headless: npxConfig.headless, args: npxConfig.args, isRoot, isCI, hasDisplay });
 
 // Docker configuration for containerized environment
 export const dockerConfig: LaunchOptions = { 
